@@ -4,10 +4,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "node chattelegram.js",
-    "lint": "next lint"
+    "start": "node chattelegram.js"
   },
   "dependencies": {
     "@langchain/community": "^0.2.31",
