@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "start": "node chatwhats.js"
+    "start": "node index.js",
+    "start:telegram": "node chattelegram.js",
+    "start:whatsapp": "node chatwhats.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
     "@langchain/community": "^0.3.42",
