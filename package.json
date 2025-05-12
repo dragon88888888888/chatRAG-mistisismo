@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "start": "node chatwhats.js"
+    "start": "node index.js",
+    "start:telegram": "node chattelegram.js",
+    "start:whatsapp": "node chatwhats.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
     "@langchain/community": "^0.3.42",
@@ -43,6 +46,7 @@
     "@types/unist": "^3.0.3",
     "eslint": "^8",
     "eslint-config-next": "14.2.5",
+    "nodemon": "^3.0.2",
     "postcss": "^8.5.1",
     "tailwindcss": "^3.4.17"
   }

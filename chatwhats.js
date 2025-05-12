@@ -1,20 +1,27 @@
 import express from 'express';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
+import fs from 'fs/promises';
+import path from 'path';
+import os from 'os';
 dotenv.config();
 
-// Importa tu sistema beta (ajusta la ruta según tu proyecto)
+// Importa tu sistema beta y el procesador de PDFs
 import { AgenticRAGSystem } from './rag-chat.js';
+import pdfProcessor from './pdf-processor.js';
 
 // Configuración de WhatsApp
 const WHATSAPP_API_TOKEN = process.env.WHATSAPP_API_TOKEN;
 const WHATSAPP_CLOUD_NUMBER_ID = process.env.WHATSAPP_CLOUD_NUMBER_ID;
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.WHATSAPP_PORT || 5000;
 
 if (!WHATSAPP_API_TOKEN || !WHATSAPP_CLOUD_NUMBER_ID || !WEBHOOK_VERIFY_TOKEN) {
-    throw new Error("Faltan variables de entorno necesarias");
+    throw new Error("Faltan variables de entorno necesarias para WhatsApp");
 }
+
+// Directorio temporal para archivos descargados
+const tempDir = path.join(os.tmpdir(), 'whatsapp_downloads');
 
 // Clase para manejar la API de WhatsApp
 class WhatsAppClient {
@@ -55,6 +62,44 @@ class WhatsAppClient {
             throw error;
         }
     }
+
+    // Método para descargar archivos desde WhatsApp
+    async downloadMedia(mediaId) {
+        try {
+            const response = await fetch(`${this.API_URL}/media/${mediaId}`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${WHATSAPP_API_TOKEN}`
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Error descargando media: ${response.statusText}`);
+            }
+
+            const mediaData = await response.json();
+
+            // Obtener la URL real del archivo
+            const mediaUrl = mediaData.url;
+
+            // Descargar el archivo
+            const fileResponse = await fetch(mediaUrl, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${WHATSAPP_API_TOKEN}`
+                }
+            });
+
+            if (!fileResponse.ok) {
+                throw new Error(`Error descargando archivo: ${fileResponse.statusText}`);
+            }
+
+            return await fileResponse.buffer();
+        } catch (error) {
+            console.error('Error al descargar media:', error);
+            throw error;
+        }
+    }
 }
 
 // Crear aplicación Express
@@ -70,10 +115,24 @@ const agenticRAG = new AgenticRAGSystem();
 // Inicializar el vector store al arrancar
 (async () => {
     try {
+        // Crear directorio temporal si no existe
+        await fs.mkdir(tempDir, { recursive: true });
+
+        // Inicializar vector store para el RAG
         await agenticRAG.initVectorStore();
-        console.log("WhatsApp Bot iniciado y vector store inicializado.");
+
+        // Inicializar processor de PDFs
+        await pdfProcessor.initVectorStore();
+
+        console.log("WhatsApp Bot iniciado y vector stores inicializados.");
+
+        // Notificar al proceso principal que el bot está listo
+        if (process.send) {
+            process.send('ready');
+        }
     } catch (error) {
-        console.error("Error inicializando vector store:", error);
+        console.error("Error inicializando:", error);
+        process.exit(1);
     }
 })();
 
@@ -111,17 +170,17 @@ app.post('/webhook', async (req, res) => {
 
         if (messages && messages.length > 0) {
             const message = messages[0];
+            const senderPhone = message.from;
 
-            // Procesar solo mensajes de texto
+            // Procesar mensajes de texto
             if (message.type === 'text') {
-                const senderPhone = message.from;
                 const text = message.text?.body;
 
                 console.log(`Mensaje recibido de ${senderPhone}: ${text}`);
 
                 // Verificar si es el mensaje de bienvenida
                 if (text.trim().toLowerCase() === 'hola' || text.trim().toLowerCase() === 'start') {
-                    const welcomeMessage = "¡Bienvenido a ChatMistery Bot en WhatsApp! Por el momento la información que tengo es sobre libros como: 'El libro tibetano de la vida y de la muerte (Sogyal Rimpoche)', 'Illuminati: los secretos de la secta más temida' y 'Todos los evangelios - AA VV'. ¡Pregúntame lo que quieras!";
+                    const welcomeMessage = "¡Bienvenido a Chettry Bot en WhatsApp! puedes enviarme archivos PDF para ampliar mi conocimiento.";
                     await whatsappClient.sendTextMessage(welcomeMessage, senderPhone);
                 } else {
                     // Procesar la consulta con tu sistema RAG
@@ -133,11 +192,53 @@ app.post('/webhook', async (req, res) => {
                         await whatsappClient.sendTextMessage("Ocurrió un error al procesar tu consulta.", senderPhone);
                     }
                 }
-            } else if (message.type === 'audio') {
-                const senderPhone = message.from;
+            }
+            // Procesar documentos (PDFs)
+            else if (message.type === 'document') {
+                const document = message.document;
+                const mediaId = document.id;
+                const fileName = document.filename || `documento_${Date.now()}.pdf`;
+                const mimeType = document.mime_type;
+
+                // Verificar si es un PDF
+                if (mimeType !== 'application/pdf' && !fileName.toLowerCase().endsWith('.pdf')) {
+                    await whatsappClient.sendTextMessage("Solo puedo procesar archivos PDF. Por favor, envía un documento en formato PDF.", senderPhone);
+                    res.sendStatus(200);
+                    return;
+                }
+
+                try {
+                    // Informar al usuario que estamos procesando el PDF
+                    await whatsappClient.sendTextMessage(`📝 Procesando el PDF "${fileName}"... Esto puede tomar un momento.`, senderPhone);
+
+                    // Descargar el archivo
+                    const fileBuffer = await whatsappClient.downloadMedia(mediaId);
+
+                    // Procesar el PDF
+                    const result = await pdfProcessor.processPDF(fileBuffer, fileName);
+
+                    if (result.success) {
+                        await whatsappClient.sendTextMessage(
+                            `✅ ¡PDF procesado con éxito!\n\n${result.message}\n\nAhora puedes hacerme preguntas sobre el contenido de este documento.`,
+                            senderPhone
+                        );
+                    } else {
+                        await whatsappClient.sendTextMessage(
+                            `❌ Error al procesar el PDF: ${result.message}`,
+                            senderPhone
+                        );
+                    }
+                } catch (error) {
+                    console.error('Error procesando el documento:', error);
+                    await whatsappClient.sendTextMessage("Ocurrió un error al procesar el documento. Por favor, intenta nuevamente.", senderPhone);
+                }
+            }
+            // Si se recibe audio
+            else if (message.type === 'audio' || message.type === 'voice') {
                 await whatsappClient.sendTextMessage("Lo siento, aún no soporto entrada de audio.", senderPhone);
-            } else if (message.type === 'image') {
-                const senderPhone = message.from;
+            }
+            // Si se recibe una imagen
+            else if (message.type === 'image') {
                 await whatsappClient.sendTextMessage("Lo siento, la funcionalidad para procesar imágenes aún no está implementada.", senderPhone);
             }
         }
@@ -167,6 +268,19 @@ app.post('/send-message', async (req, res) => {
 });
 
 // Iniciar servidor
-app.listen(PORT, () => {
-    console.log(`Servidor ejecutándose en puerto ${PORT}`);
+const server = app.listen(PORT, () => {
+    console.log(`Servidor de WhatsApp ejecutándose en puerto ${PORT}`);
+});
+
+// Manejo de cierre
+process.on('SIGINT', () => {
+    server.close();
+    console.log('Servidor de WhatsApp detenido');
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    server.close();
+    console.log('Servidor de WhatsApp detenido');
+    process.exit(0);
 });
