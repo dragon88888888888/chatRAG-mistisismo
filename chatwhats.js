@@ -1,5 +1,6 @@
 import express from 'express';
 import fetch from 'node-fetch';
+import axios from 'axios';
 import dotenv from 'dotenv';
 import fs from 'fs/promises';
 import path from 'path';
@@ -64,52 +65,77 @@ class WhatsAppClient {
         }
     }
 
-    // Método mejorado para descargar archivos desde WhatsApp
+    // Método mejorado para descargar medios usando axios
     async downloadMedia(mediaId) {
         try {
-            console.log(`Intentando descargar media con ID: ${mediaId}`);
+            console.log(`Intentando obtener URL del medio con ID: ${mediaId}`);
 
-            // Primero obtenemos la URL del archivo
-            const response = await fetch(`${this.API_URL}/media/${mediaId}`, {
-                method: 'GET',
+            // Paso 1: Obtener la URL del medio
+            const metadataUrl = `https://graph.facebook.com/v20.0/${mediaId}`;
+            console.log(`URL de metadatos: ${metadataUrl}`);
+
+            const metadataResponse = await axios.get(metadataUrl, {
                 headers: {
                     'Authorization': `Bearer ${WHATSAPP_API_TOKEN}`
                 }
             });
 
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`Error obteniendo URL de descarga: ${response.statusText} - ${errorText}`);
+            if (!metadataResponse.data || !metadataResponse.data.url) {
+                throw new Error('No se pudo obtener la URL del medio');
             }
 
-            const mediaData = await response.json();
+            console.log(`URL del medio obtenida: ${metadataResponse.data.url}`);
 
-            if (!mediaData.url) {
-                throw new Error(`No se pudo obtener la URL de descarga para el media ID: ${mediaId}`);
-            }
+            // Paso 2: Descargar el archivo usando la URL obtenida
+            const mediaUrl = metadataResponse.data.url;
 
-            console.log(`URL de descarga obtenida: ${mediaData.url}`);
-
-            // Ahora descargamos el archivo desde la URL
-            const fileResponse = await fetch(mediaData.url, {
-                method: 'GET',
+            // Importante: Usar User-Agent correcto
+            const mediaResponse = await axios.get(mediaUrl, {
                 headers: {
-                    'Authorization': `Bearer ${WHATSAPP_API_TOKEN}`
-                }
+                    'Authorization': `Bearer ${WHATSAPP_API_TOKEN}`,
+                    'User-Agent': 'WhatsApp/2.19.81 A'
+                },
+                responseType: 'arraybuffer'
             });
 
-            if (!fileResponse.ok) {
-                const errorText = await fileResponse.text();
-                throw new Error(`Error descargando archivo: ${fileResponse.statusText} - ${errorText}`);
-            }
+            console.log(`Medio descargado: ${mediaResponse.data.byteLength} bytes`);
 
-            // Convertir la respuesta a un buffer
-            const buffer = await fileResponse.buffer();
-            console.log(`Archivo descargado correctamente: ${buffer.length} bytes`);
-
-            return buffer;
+            return Buffer.from(mediaResponse.data);
         } catch (error) {
-            console.error('Error al descargar media:', error);
+            console.error('Error al descargar el medio:', error.message);
+            if (error.response) {
+                console.error('Detalles de la respuesta:', {
+                    status: error.response.status,
+                    headers: error.response.headers,
+                    data: error.response.data
+                });
+            }
+            throw new Error(`Error al descargar el medio: ${error.message}`);
+        }
+    }
+
+    // Método para descargar PDFs de URLs
+    async downloadPdfFromUrl(url) {
+        try {
+            console.log(`Descargando PDF desde URL: ${url}`);
+
+            const response = await axios.get(url, {
+                responseType: 'arraybuffer',
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+            });
+
+            // Verificar que sea un PDF
+            const contentType = response.headers['content-type'];
+            if (!contentType || !contentType.includes('application/pdf')) {
+                console.warn(`El contenido descargado no es un PDF. Content-Type: ${contentType}`);
+                // Continuamos de todos modos, ya que algunas URLs no configuran bien el Content-Type
+            }
+
+            return Buffer.from(response.data);
+        } catch (error) {
+            console.error('Error al descargar PDF desde URL:', error.message);
             throw error;
         }
     }
@@ -211,9 +237,47 @@ app.post('/webhook', async (req, res) => {
 
             // Verificar si es el mensaje de bienvenida
             if (text.trim().toLowerCase() === 'hola' || text.trim().toLowerCase() === 'start') {
-                const welcomeMessage = "¡Bienvenido a ChatMistery Bot en WhatsApp! Por el momento la información que tengo es sobre libros como: 'El libro tibetano de la vida y de la muerte (Sogyal Rimpoche)', 'Illuminati: los secretos de la secta más temida' y 'Todos los evangelios - AA VV'. ¡Pregúntame lo que quieras!\n\n📄 También puedes enviarme archivos PDF para ampliar mi conocimiento.";
+                const welcomeMessage = "¡Bienvenido a ChatMistery Bot en WhatsApp! Por el momento la información que tengo es sobre libros como: 'El libro tibetano de la vida y de la muerte (Sogyal Rimpoche)', 'Illuminati: los secretos de la secta más temida' y 'Todos los evangelios - AA VV'. ¡Pregúntame lo que quieras!\n\nTambién puedes compartir enlaces a PDFs usando el formato: \"pdf: URL_DEL_PDF\"";
                 await whatsappClient.sendTextMessage(welcomeMessage, senderPhone);
-            } else {
+            }
+            // Verificar si es un enlace a un PDF
+            else if (text.trim().toLowerCase().startsWith('pdf:')) {
+                const pdfUrl = text.trim().substring(4).trim();
+
+                if (!pdfUrl || !pdfUrl.includes('http')) {
+                    await whatsappClient.sendTextMessage("Por favor, proporciona una URL válida después de 'pdf:'. Por ejemplo: pdf: https://drive.google.com/file/d/abc123/view", senderPhone);
+                    return;
+                }
+
+                try {
+                    await whatsappClient.sendTextMessage(`📝 Descargando PDF desde: ${pdfUrl}...`, senderPhone);
+
+                    // Descargar el PDF desde la URL
+                    const pdfBuffer = await whatsappClient.downloadPdfFromUrl(pdfUrl);
+
+                    // Generar un nombre para el archivo
+                    const fileName = `doc_${Date.now()}.pdf`;
+
+                    // Procesar el PDF
+                    const result = await pdfProcessor.processPDF(pdfBuffer, fileName);
+
+                    if (result.success) {
+                        await whatsappClient.sendTextMessage(
+                            `✅ ¡PDF procesado con éxito!\n\n${result.message}\n\nAhora puedes hacerme preguntas sobre el contenido de este documento.`,
+                            senderPhone
+                        );
+                    } else {
+                        await whatsappClient.sendTextMessage(
+                            `❌ Error al procesar el PDF: ${result.message}`,
+                            senderPhone
+                        );
+                    }
+                } catch (error) {
+                    console.error("Error procesando URL de PDF:", error);
+                    await whatsappClient.sendTextMessage(`Error al procesar la URL: ${error.message}`, senderPhone);
+                }
+            }
+            else {
                 // Procesar la consulta con tu sistema RAG
                 try {
                     const response = await agenticRAG.processQuery(text);
@@ -232,53 +296,13 @@ app.post('/webhook', async (req, res) => {
             }
 
             const document = message.document;
-            const mediaId = document.id;
             const fileName = document.filename || `documento_${Date.now()}.pdf`;
-            const mimeType = document.mime_type;
 
-            console.log(`Documento recibido: ${fileName}, tipo: ${mimeType}, ID: ${mediaId}`);
-
-            // Verificar si es un PDF
-            if (mimeType !== 'application/pdf' && !fileName.toLowerCase().endsWith('.pdf')) {
-                await whatsappClient.sendTextMessage("Solo puedo procesar archivos PDF. Por favor, envía un documento en formato PDF.", senderPhone);
-                return;
-            }
-
-            try {
-                // Informar al usuario que estamos procesando el PDF
-                await whatsappClient.sendTextMessage(`📝 Procesando el PDF "${fileName}"... Esto puede tomar un momento.`, senderPhone);
-
-                // Intentar descargar el archivo
-                console.log(`Intentando descargar el archivo con media ID: ${mediaId}`);
-                const fileBuffer = await whatsappClient.downloadMedia(mediaId);
-                console.log(`Archivo descargado correctamente: ${fileBuffer.length} bytes`);
-
-                // Guardar temporalmente el archivo para debug
-                const tempFilePath = path.join(tempDir, fileName);
-                await fs.writeFile(tempFilePath, fileBuffer);
-                console.log(`Archivo guardado temporalmente en: ${tempFilePath}`);
-
-                // Procesar el PDF
-                const result = await pdfProcessor.processPDF(fileBuffer, fileName);
-
-                if (result.success) {
-                    await whatsappClient.sendTextMessage(
-                        `✅ ¡PDF procesado con éxito!\n\n${result.message}\n\nAhora puedes hacerme preguntas sobre el contenido de este documento.`,
-                        senderPhone
-                    );
-                } else {
-                    await whatsappClient.sendTextMessage(
-                        `❌ Error al procesar el PDF: ${result.message}`,
-                        senderPhone
-                    );
-                }
-            } catch (error) {
-                console.error('Error procesando el documento:', error);
-                await whatsappClient.sendTextMessage(
-                    `No pude procesar el documento. Error: ${error.message}`,
-                    senderPhone
-                );
-            }
+            // Informar al usuario sobre las limitaciones actuales de procesamiento directo
+            await whatsappClient.sendTextMessage(
+                `Lo siento, actualmente la API de WhatsApp tiene restricciones para la descarga directa de documentos.\n\nPuedes subir tu PDF "${fileName}" a Google Drive o similar y compartir el enlace conmigo usando el formato: "pdf: URL_DEL_PDF"`,
+                senderPhone
+            );
         }
         // Si se recibe audio
         else if (message.type === 'audio' || message.type === 'voice') {
